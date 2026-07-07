@@ -1,0 +1,29 @@
+server:
+    port: 8080
+    tomcat:
+      max-http-form-post-size: 50MB
+      max-swallow-size: 50MB
+
+spring:
+  application:
+    name: arno-mock-snowflake
+
+mock:
+  snowflake:
+    duckdb:
+      url: "jdbc:duckdb:"
+    defaults:
+      database: TESTDB
+      schema: PUBLIC
+      warehouse: COMPUTE_WH
+      role: ACCOUNTADMIN
+      account: MOCK
+      region: AWS_US_WEST_2
+    server-version: "8.40.0"
+    session-validity-seconds: 3600
+    master-validity-seconds: 14400
+
+logging:
+  level:
+    org.package: INFO
+    org.package.engine: INFO
