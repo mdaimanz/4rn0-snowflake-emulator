@@ -1,9 +1,15 @@
 package org.example.config;
 
-
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
+/**
+ * Configuration for the mock server, bound from the {@code mock.snowflake.*} namespace.
+ *
+ * <p>All values have sensible defaults so the server runs with zero configuration, which is what
+ * the Docker image relies on. Override any value through environment variables, e.g.
+ * {@code MOCK_SNOWFLAKE_DUCKDB_URL=jdbc:/data/test.duckdb}.
+ */
 @ConfigurationProperties("mock.snowflake")
 public record MockSnowflakeProperties(
         DuckDb duckDb,
