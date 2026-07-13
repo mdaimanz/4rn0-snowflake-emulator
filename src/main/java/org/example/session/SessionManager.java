@@ -61,6 +61,16 @@ public class SessionManager {
 
     public Session getByToken(String token) { return token == null ? null : sessionsByToken.get(token); }
 
+    /**
+     * Returns the session bound to {@code token}, or a shared default session when the token is
+     * unknown. Being lenient keeps the mock usable even when token plumbing differs across driver
+     * versions.
+     */
+    public Session resolveOrDefault(String token) {
+        Session session = getByToken(token);
+        return session != null ? session : defaultSession();
+    }
+
     public Session defaultSession() {
         Session existing = defaultSession;
         if (existing != null) {
