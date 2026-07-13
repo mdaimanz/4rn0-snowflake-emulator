@@ -47,7 +47,7 @@ public final class Session {
         return masterToken;
     }
 
-    public void masterToken(String masterToken) {
+    public void setMasterToken(String masterToken) {
         this.masterToken = masterToken;
     }
 

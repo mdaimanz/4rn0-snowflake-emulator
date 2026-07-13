@@ -92,6 +92,18 @@ public class SessionManager {
         return defaultSession;
     }
 
+    public Session renew(String oldToken) {
+        Session session = getByToken(oldToken);
+        if (session == null) {
+            return null;
+        }
+        sessionsByToken.remove(oldToken);
+        session.setToken(newToken());
+        session.setMasterToken(newToken());
+        sessionsByToken.put(session.token(), session);
+        return session;
+    }
+
     public void close(String token) {
         Session session = sessionsByToken.remove(token);
         if(session == null) {
