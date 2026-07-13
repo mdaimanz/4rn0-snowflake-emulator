@@ -7,14 +7,10 @@ import org.springframework.cglib.core.Local;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+import java.sql.*;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -55,6 +51,94 @@ public class QueryExecutor {
     private final DuckDbEngine engine;
 
     public QueryExecutor(DuckDbEngine engine) { this.engine = engine; }
+
+    public QueryOutcome execute(Session session, String sqlText, Map<String,Object> bindings, boolean describeOnly) {
+        String queryId = UUID.randomUUID().toString();
+        String sql = stripTrailingSemicolon(sqlText == null ? "" : sqlText.strip());
+        StatementCategory category = StatementClassifier.classify(sql);
+
+        try {
+            if (category == SCL ) {
+                return handleSessionControl(session, sql, queryId);
+            }
+            if (category == TCL) {
+                return status(queryId, "Statement executed successfully.");
+            }
+            if (category == DDL) {
+                QueryOutcome special = handleDdl(session, sql, queryId);
+                if (special != null) {
+                    return special;
+                }
+            }
+
+            String translated = SqlTranslator.translate(sql, category);
+            if (describeOnly) {
+                return describe(session, translated, queryId);
+            }
+            return run(session, translated, category, bindings, queryId);
+        } catch (SQLException e) {
+            log.debug("SQL error executing [{}]: {}", sql, e.getMessage());
+            throw new MockSqlException(e.getMessage(), e.getSQLState(), null);
+        }
+    }
+
+    // ----- Execution ----------
+
+    private QueryOutcome run(Session session, String sql, StatementCategory category,
+                             Map<String, Object> bindings, String queryId) throws SQLException {
+        Connection conn = session.connection();
+        if (bindings == null || bindings.isEmpty()) {
+            try (Statement st = conn.createStatement()) {
+                boolean hasResultSet = st.execute(sql);
+                return collect(st, hasResultSet, category, queryId);
+            }
+        }
+
+        int batchSize = arrayBindLength(bindings);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (batchSize > 0) {
+                for (int row = 0; row < batchSize; row++) {
+                    applyBindings(ps, bindings, row);
+                    ps.addBatch();
+                }
+                long total = 0;
+                for (int count : ps.executeBatch()) {
+                    total += Math.max(count, 0);
+                }
+                return category.isDml() ? dmlCount(queryId, category, total) :
+                        status(queryId, "Statement executed successfully.");
+            }
+            applyBindings(ps, bindings, -1);
+            boolean hasResultSet = ps.execute();
+            return collect(ps, hasResultSet, category, queryId);
+        }
+    }
+
+    private QueryOutcome collect(Statement st, boolean hasResultSet, StatementCategory category,
+                                 String queryId) throws SQLException {
+        if (hasResultSet) {
+            try (ResultSet rs = st.getResultSet()) {
+                ResultMapper.Mapped mapped = ResultMapper.map(rs);
+                long typeId = category.isDml() ? category.typeId() : SELECT.typeId();
+                return new QueryOutcome(queryId, mapped.columns(), mapped.rows(), typeId);
+            }
+        }
+        int updateCount = st.getUpdateCount();
+        if (category.isDml()) {
+            return dmlCount(queryId, category, Math.max(updateCount, 0));
+        }
+        return status(queryId, "Statement executed successfully.");
+    }
+
+    private QueryOutcome describe(Session session, String sql, String queryId) {
+        try (PreparedStatement ps = session.connection().prepareStatement(sql)) {
+            ResultSetMetaData md = ps.getMetaData();
+            List<SnowflakeColumn> columns = (md == null) ? List.of() : ResultMapper.columns(md);
+            return new QueryOutcome(queryId, columns, List.of(), SELECT.typeId());
+        } catch (SQLException e) {
+            return new QueryOutcome(queryId, List.of(), List.of(), SELECT.typeId());
+        }
+    }
 
     // --- Special command handling ------------
     private QueryOutcome handleSessionControl(Session session, String sql, String queryId) throws SQLException {
