@@ -1,5 +1,9 @@
 package org.example.engine;
 
+import org.example.session.Session;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.cglib.core.Local;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -11,11 +15,110 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.example.engine.StatementCategory.*;
 
 @Component
 public class QueryExecutor {
+
+    private static final Logger log = LoggerFactory.getLogger(QueryExecutor.class);
+
+    /**
+     * CREATE/DROP/ALTER targeting Snowflake-only account objects -> treated as no-ops
+     */
+    private static final Pattern IGNORED_DDL = Pattern.compile(
+            "^(?:CREATE(?:\\s+OR\\s+REPLACE)?|DROP|ALTER)"
+            + "(?:\\s+(?:TEMP|TEMPORARY|TRANSIENT|SECURE|GLOBAL|LOCAL|VOLATILE))*"
+            + "\\s+(?:IF\\s(?:NOT\\s+)?EXISTS\\s+)?"
+            + "(?:WAREHOUSE|RESOURCE\\s+MONITOR|ROLE|USER|SHARE|NETWORK\\s+POLICY|STAGE|PIPE"
+            + "|STREAM|TASK|FILE\\s+FORMAT|MASKING\\s+POLICY|ROW\\s+ACCESS\\s+POLICY|TAG"
+            + "|SECURITY\\s+INTEGRATION|STORAGE|\\s+INTEGRATION|API\\s+INTEGRATION"
+            + "|NOTIFICATION\\s+INTEGRATION|EXTERNAL\\s+FUNCTION|PROCEDURE|FUNCTION)\\b",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * CREATE/DROP/ALTER DATABASE|SCHEMA, capturing action, object type and name.
+     */
+    private static final Pattern DB_SCHEMA_DDL = Pattern.compile(
+            "^(?:CREATE(?:\\s+OR\\s+REPLACE)?|DROP|ALTER)"
+            + "(?:\\s+(?:TEMP|TEMPORARY|TRANSIENT|SECURE|GLOBAL|LOCAL|VOLATILE))*"
+            + "\\s+(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?"
+            + "(?:WAREHOUSE|RESOURCE\\s+MONITOR|ROLE|USER|SHARE|NETWORK\\s+POLICY|STAGE|PIPE"
+            + "|STREAM|TASK|FILE\\s+FORMAT|MASKING\\s+POLICY|ROW\\s+ACCESS\\s+POLICY|TAG"
+            + "|SECURITY\\s+INTEGRATION|STORAGE\\s+INTEGRATION|API\\s+INTEGRATION"
+            + "|NOTIFICATION\\s+INTEGRATION|EXTERNAL\\s+FUNCTION|PROCEDURE|FUNCTION)\\b"
+            ,Pattern.CASE_INSENSITIVE
+    );
+
+    private final DuckDbEngine engine;
+
+    public QueryExecutor(DuckDbEngine engine) { this.engine = engine; }
+
+    // --- Special command handling ------------
+    private QueryOutcome handleSessionControl(Session session, String sql, String queryId) throws SQLException {
+        String upper = sql.toUpperCase(Locale.ROOT);
+        if(!upper.startsWith("USE")) {
+            // SET / UNSET / ALTER SESSION - accepted and ignored
+            return status(queryId, "Statement execute successfully");
+        }
+
+        String rest = sql.substring(3).strip();
+        String keyword = firstToken(rest).toUpperCase();
+        String argument = switch (keyword) {
+            case "WAREHOUSE", "ROLE", "DATABASE", "SCHEMA" -> rest.substring(keyword.length()).strip();
+            default -> rest;
+        };
+        String name = cleanIdentifier(firstToken(argument));
+
+        switch (keyword) {
+            case "WAREHOUSE" -> session.setWarehouse(name.toUpperCase(Locale.ROOT));
+            case "ROLE" -> session.setRole(name.toUpperCase(Locale.ROOT));
+            case "DATABASE" -> {
+                engine.ensureContext(session.connection(), name, session.schema());
+                session.setDatabase(name.toUpperCase(Locale.ROOT));
+            }
+            default -> applyUseSchema(session, name);
+        }
+        return status(queryId, "Statement executed successfully.");
+    }
+
+    private void applyUseSchema(Session session, String name) throws SQLException {
+        String[] parts = name.split("\\.");
+        String db = parts.length > 1 ? cleanIdentifier(parts[0]) : session.database();
+        String schema = cleanIdentifier(parts[parts.length -1]);
+        engine.ensureContext(session.connection(), db, schema);
+        session.setDatabase(db.toUpperCase(Locale.ROOT));
+        session.setSchema(schema.toUpperCase(Locale.ROOT));
+    }
+
+    private QueryOutcome handleDdl(Session session, String sql, String queryId) throws SQLException {
+        String first = firstToken(sql).toUpperCase(Locale.ROOT);
+        if (first.equals("GRANT") || first.equals("REVOKE")) {
+            return status(queryId, "Statement executed successfully");
+        }
+        if(IGNORED_DDL.matcher(sql).find()) {
+             return status(queryId, "Statement executed successfully");
+        }
+        Matcher m = DB_SCHEMA_DDL.matcher(sql);
+        if (m.find()) {
+            String action = m.group(1).toUpperCase(Locale.ROOT);
+            String objectType = m.group(2).toUpperCase(Locale.ROOT);
+            String name = cleanIdentifier(m.group(3));
+            if (action.startsWith("CREATE")) {
+                if(objectType.equals("DATABASE")) {
+                    engine.ensureContext(session.connection(), name, session.schema());
+                    session.setDatabase(name.toUpperCase(Locale.ROOT));
+                } else {
+                    applyUseSchema(session, name);
+                }
+            }
+            // DROP / ALTER DATABASE / SCHEMA are accepted but not enacted
+            return status(queryId, "Statement executed successfully");
+        }
+        return null; // Hands off to DuckDB (CREATE TABLE / VIEW / SEQUENCE / ...)
+    }
 
     // ---- Bindings ----------------
     private void applyBindings(PreparedStatement ps, Map<String, Object> bindings, int row) throws SQLException {
