@@ -3,7 +3,6 @@ package org.example.engine;
 import org.example.session.Session;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.cglib.core.Local;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -16,6 +15,11 @@ import java.util.regex.Pattern;
 
 import static org.example.engine.StatementCategory.*;
 
+/**
+ * Executes a single snowflake SQL statement against a session's DuckDB connectio and produces a
+ * {@link QueryOutcome}. Snowflake-specific commands that DuckDB does not understand (USE / SET / account-object DDL)
+ * are handled here instead of being forwarded to DuckDB.
+ */
 @Component
 public class QueryExecutor {
 
